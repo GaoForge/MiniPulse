@@ -1,0 +1,7 @@
+.tools/
+build/
+dist/
+MiniPulse.exe
+*.obj
+*.res
+/sensors/MiniPulse.Sensors.exe

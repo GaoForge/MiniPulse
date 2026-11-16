@@ -1,0 +1,22 @@
+MiniPulse Sensors dependencies
+
+LibreHardwareMonitor 0.9.6 (unmodified official .NET Framework binaries)
+Source: https://github.com/LibreHardwareMonitor/LibreHardwareMonitor/tree/v0.9.6
+Download: https://github.com/LibreHardwareMonitor/LibreHardwareMonitor/releases/tag/v0.9.6
+Archive SHA256: 086d9f1b5a99e643edc2cfaaac16051685b551e4c5ac0b32a57c58c0e529c001
+License: MPL-2.0. See LibreHardwareMonitor-LICENSE.txt and THIRD-PARTY-NOTICES.txt.
+Embedded PawnIO modules: see PawnIO-Modules-LICENSE.txt.
+This folder contains the release DLL dependencies; UI-only libraries may not be loaded.
+Reproduce: extract release ZIP DLLs to sensors/, then run build-sensors.ps1.
+
+PawnIO Setup 2.2.0 (unmodified official release)
+https://github.com/namazso/PawnIO.Setup/releases/tag/2.2.0
+SHA256: 1f519a22e47187f70a1379a48ca604981c4fcf694f4e65b734aaa74a9fba3032
+Source and license: https://github.com/namazso/PawnIO
+Official website: https://pawnio.eu/
+The original setup displays its license and edition choices. Use the signed official edition.
+MiniPulse does not disable driver signing, security protections, or install an unrestricted driver.
+PawnIO is shared system software and is NOT removed when MiniPulse is uninstalled.
+
+Sensors.cs is MiniPulse MIT source. The helper only reads sensor values and exits
+when the UI closes; there is no persistent elevated service or hardware control API.
