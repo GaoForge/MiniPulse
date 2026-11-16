@@ -11,6 +11,6 @@ if (!$compiler) {
 $compilerBin = Join-Path $compiler.FullName 'bin'
 & (Join-Path $compilerBin 'x86_64-w64-mingw32-windres.exe') 'resources.rc' '-O' 'coff' '-o' 'build\resources.o'
 if ($LASTEXITCODE -ne 0) { throw 'Resource compilation failed.' }
-& (Join-Path $compilerBin 'x86_64-w64-mingw32-clang++.exe') '-std=c++17' '-O2' '-Wall' '-Wextra' '-static' '-municode' '-mwindows' 'MiniPulse.cpp' 'TemperatureReader.cpp' 'HardwareSensors.cpp' 'TaskbarWidget.cpp' 'build\resources.o' '-o' 'MiniPulse.exe' '-lshell32' '-luser32' '-lgdi32' '-liphlpapi' '-ldwmapi' '-lpdh' '-ladvapi32' '-lwbemuuid' '-lole32' '-loleaut32' '-luuid' '-lgdiplus'
+& (Join-Path $compilerBin 'x86_64-w64-mingw32-clang++.exe') '-std=c++17' '-O2' '-Wall' '-Wextra' '-static' '-municode' '-mwindows' 'MiniPulse.cpp' 'AutoStart.cpp' 'TemperatureReader.cpp' 'HardwareSensors.cpp' 'TaskbarWidget.cpp' 'build\resources.o' '-o' 'MiniPulse.exe' '-lshell32' '-luser32' '-lgdi32' '-liphlpapi' '-ldwmapi' '-lpdh' '-ladvapi32' '-lwbemuuid' '-lole32' '-loleaut32' '-luuid' '-lgdiplus' '-ltaskschd'
 if ($LASTEXITCODE -ne 0) { throw 'C++ compilation failed.' }
 Write-Host "Built: $(Join-Path $PSScriptRoot 'MiniPulse.exe')"

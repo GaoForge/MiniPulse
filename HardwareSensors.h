@@ -1,5 +1,5 @@
 #pragma once
 #include "TemperatureReader.h"
-void StartHardwareSensors(bool elevated = false);
+void StartHardwareSensors();
 void StopHardwareSensors();
 Temperatures ReadHardwareSensors();

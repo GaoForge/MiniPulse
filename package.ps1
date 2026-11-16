@@ -1,5 +1,7 @@
 $ErrorActionPreference = 'Stop'
 Set-Location -LiteralPath $PSScriptRoot
+$version = [regex]::Match((Get-Content -LiteralPath 'installer.iss' -Raw), '(?m)^#define AppVersion "([^"]+)"').Groups[1].Value
+if (!$version) { throw 'AppVersion not found in installer.iss.' }
 & (Join-Path $PSScriptRoot 'build.ps1')
 $innoCompiler = Join-Path $PSScriptRoot '.tools\inno6\ISCC.exe'
 if (!(Test-Path -LiteralPath $innoCompiler)) {
@@ -9,9 +11,11 @@ if (!(Test-Path -LiteralPath $innoCompiler)) {
 }
 & $innoCompiler (Join-Path $PSScriptRoot 'installer.iss')
 if ($LASTEXITCODE -ne 0) { throw 'Installer compilation failed.' }
-Write-Host "Installer: $(Join-Path $PSScriptRoot 'dist\MiniPulse-Setup-1.6.3-x64.exe')"
-Compress-Archive -Path MiniPulse.exe,LICENSE,INSTALL-NOTES.txt,sensors -DestinationPath 'dist\MiniPulse-1.6.3-x64-portable.zip' -Force
-$releaseFiles = 'dist\MiniPulse-Setup-1.6.3-x64.exe','dist\MiniPulse-1.6.3-x64-portable.zip','MiniPulse.exe'
+$setup = "dist\MiniPulse-Setup-$version-x64.exe"
+$portable = "dist\MiniPulse-$version-x64-portable.zip"
+Write-Host "Installer: $(Join-Path $PSScriptRoot $setup)"
+Compress-Archive -Path MiniPulse.exe,LICENSE,INSTALL-NOTES.txt,sensors -DestinationPath $portable -Force
+$releaseFiles = $setup,$portable,'MiniPulse.exe'
 $hashLines = foreach ($releaseFile in $releaseFiles) {
     $hash = Get-FileHash -LiteralPath $releaseFile -Algorithm SHA256
     '{0}  {1}' -f $hash.Hash.ToLowerInvariant(), [IO.Path]::GetFileName($releaseFile)

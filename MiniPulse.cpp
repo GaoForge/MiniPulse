@@ -27,6 +27,8 @@
 #include <cwchar>
 #include <cstdio>
 #include <string>
+#include <system_error>
+#include <thread>
 #include <unordered_map>
 #include <utility>
 #include "MonitorMetrics.h"
@@ -34,6 +36,7 @@
 #include "TemperatureReader.h"
 #include "HardwareSensors.h"
 #include "CpuSpecification.h"
+#include "AutoStart.h"
 
 #ifdef _MSC_VER
 #pragma comment(lib, "shell32.lib")
@@ -47,6 +50,7 @@
 
 namespace {
 constexpr UINT kTrayMessage = WM_APP + 1;
+constexpr UINT kAutoStartResult = WM_APP + 2;
 constexpr UINT_PTR kTimerId = 1;
 constexpr UINT kTrayId = 7;
 constexpr UINT kExitId = 101;
@@ -57,6 +61,8 @@ constexpr UINT kHideWidgetId = 105;
 constexpr UINT kTemperatureHelpId = 106;
 constexpr UINT kEnableSensorsId = 107;
 constexpr UINT kAutoStartId = 108;
+constexpr UINT kAutoStartDisableId = 109;
+constexpr UINT kAutoStartErrorId = 110;
 
 
 constexpr COLORREF kWhite = RGB(242, 247, 252);
@@ -79,7 +85,6 @@ PDH_HCOUNTER gDiskRead = nullptr, gDiskWrite = nullptr;
 PDH_HCOUNTER gDiskReads = nullptr, gDiskWrites = nullptr;
 std::wstring gDiagnosticsPath;
 
-bool gEnableSensors = true;
 int gPreviewSection = -1;
 
 bool gPreviewShown = false;
@@ -99,8 +104,7 @@ void ReadRuntimeOptions() {
     for (int i = 1; i < count; ++i) {
         const std::wstring argument(arguments[i]);
 
-        if (argument == L"--enable-sensors") gEnableSensors = true;
-        else if (argument.rfind(L"--preview-hover=", 0) == 0) {
+        if (argument.rfind(L"--preview-hover=", 0) == 0) {
             const std::wstring section = argument.substr(16);
             if (section == L"cpu") gPreviewSection = 0;
             else if (section == L"ram") gPreviewSection = 1;
@@ -419,20 +423,56 @@ void UpdateTray(bool add = false) {
     Shell_NotifyIconW(add ? NIM_ADD : NIM_MODIFY, &gTray);
 }
 
-int RunSchtasksSync(const std::wstring& arguments) {
-    std::wstring command = L"schtasks.exe " + arguments;
-    STARTUPINFOW startup{}; startup.cb = sizeof(startup);
-    startup.dwFlags = STARTF_USESHOWWINDOW; startup.wShowWindow = SW_HIDE;
-    PROCESS_INFORMATION process{};
-    if (!CreateProcessW(nullptr, &command[0], nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &startup, &process)) return -1;
-    WaitForSingleObject(process.hProcess, 8000);
-    DWORD code = 1; GetExitCodeProcess(process.hProcess, &code);
-    CloseHandle(process.hProcess); CloseHandle(process.hThread);
-    return static_cast<int>(code);
+AutoStartResult gAutoStart{AutoStartState::Unknown};
+bool gAutoStartBusy = false;
+AutoStartAction gAutoStartRunning = AutoStartAction::Query;
+AutoStartAction gAutoStartPending = AutoStartAction::Query;
+
+void StartAutoStartAction(AutoStartAction action) {
+    if (gAutoStartBusy) {
+        if (gAutoStartRunning == AutoStartAction::Query) gAutoStartPending = action;
+        return;
+    }
+    gAutoStartBusy = true;
+    gAutoStartRunning = action;
+    try {
+        std::thread([window = gHost, action] {
+            const auto result = ManageAutoStart(action);
+            PostMessageW(window, kAutoStartResult, static_cast<WPARAM>(result.state), result.error);
+        }).detach();
+    } catch (const std::system_error&) {
+        PostMessageW(gHost, kAutoStartResult, static_cast<WPARAM>(AutoStartState::Error), E_FAIL);
+    }
 }
 
-bool AutoStartEnabled() {
-    return RunSchtasksSync(L"/Query /TN \"MiniPulse\"") == 0;
+void AppendAutoStartMenu(HMENU menu) {
+    using State = AutoStartState;
+    if (gAutoStartBusy && gAutoStartRunning != AutoStartAction::Query) {
+        AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, L"正在更新登录自启…");
+        return;
+    }
+    switch (gAutoStart.state) {
+    case State::On:
+    case State::Legacy:
+        AppendMenuW(menu, MF_STRING | MF_CHECKED, kAutoStartDisableId, L"登录时启动 MiniPulse");
+        break;
+    case State::Off:
+        AppendMenuW(menu, MF_STRING, kAutoStartId, L"登录时启动 MiniPulse");
+        break;
+    case State::NeedsRepair:
+        AppendMenuW(menu, MF_STRING, kAutoStartId, L"修复登录自启");
+        AppendMenuW(menu, MF_STRING, kAutoStartDisableId, L"关闭登录自启");
+        break;
+    case State::Conflict:
+        AppendMenuW(menu, MF_STRING, kAutoStartErrorId, L"登录自启：任务冲突");
+        break;
+    case State::Error:
+        AppendMenuW(menu, MF_STRING, kAutoStartErrorId, L"登录自启：查看错误");
+        break;
+    case State::Unknown:
+        AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, L"正在检查登录自启…");
+        break;
+    }
 }
 
 void ShowContextMenu() {
@@ -448,7 +488,8 @@ void ShowContextMenu() {
     }
     AppendMenuW(menu, MF_STRING, kEnableSensorsId, L"重试硬件采温");
     AppendMenuW(menu, MF_STRING, kTemperatureHelpId, L"温度数据说明");
-    AppendMenuW(menu, MF_STRING | (AutoStartEnabled() ? MF_CHECKED : 0), kAutoStartId, L"开机自启");
+    AppendAutoStartMenu(menu);
+    if (!gAutoStartBusy) StartAutoStartAction(AutoStartAction::Query);
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, kExitId, L"退出 MiniPulse");
     POINT p{};
@@ -466,12 +507,22 @@ LRESULT CALLBACK HostProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
     switch (msg) {
+    case kAutoStartResult: {
+        gAutoStartBusy = false;
+        gAutoStart = {static_cast<AutoStartState>(wp), static_cast<long>(lp)};
+        const auto pending = std::exchange(gAutoStartPending, AutoStartAction::Query);
+        if (pending != AutoStartAction::Query) StartAutoStartAction(pending);
+        else if (gAutoStart.error && gAutoStartRunning != AutoStartAction::Query) {
+            MessageBoxW(hwnd, AutoStartErrorText(gAutoStart.error), L"MiniPulse · 登录自启", MB_OK | MB_ICONWARNING);
+        }
+        return 0;
+    }
     case WM_TIMER:
         if (wp == kTimerId) {
             SampleMetrics();
             UpdateTray();
             UpdateTaskbarWidget(gMetrics);
-            const bool cpuPreviewReady = !gEnableSensors || gMetrics.cpuClockMaximumMHz > 0 || gSampleCount >= 30;
+            const bool cpuPreviewReady = gMetrics.cpuClockMaximumMHz > 0 || gSampleCount >= 30;
             if (!gPreviewShown && gPreviewSection >= 0 && gSampleCount >= 3 && cpuPreviewReady && GetWidgetDiagnostics().visible) {
                 PreviewWidgetDetails(gPreviewSection);
                 gPreviewShown = true;
@@ -484,7 +535,7 @@ LRESULT CALLBACK HostProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             }
             WriteDiagnostics();
             if (!gScreenCaptureDone && !gScreenCapturePath.empty() && gSampleCount >= 5 &&
-                (!gEnableSensors || gMetrics.cpuClockMaximumMHz > 0 || gSampleCount >= 30)) {
+                cpuPreviewReady) {
                 GdiFlush();
                 gScreenCaptureDone = CaptureWidgetOnScreen(gScreenCapturePath.c_str());
             }
@@ -502,7 +553,7 @@ LRESULT CALLBACK HostProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case kEmbeddedId: SetWidgetPlacement(WidgetPlacement::Taskbar); return 0;
         case kFloatingId: SetWidgetPlacement(WidgetPlacement::AboveTaskbar); return 0;
         case kHideWidgetId: SetWidgetPlacement(WidgetPlacement::Hidden); return 0;
-        case kEnableSensorsId: StartHardwareSensors(true); return 0;
+        case kEnableSensorsId: StartHardwareSensors(); return 0;
         case kTemperatureHelpId: {
             const std::wstring status = L"CPU：" + std::wstring(TemperatureStateText(gMetrics.cpuTemperatureState)) +
                 L"\n内存：" + TemperatureStateText(gMetrics.memoryTemperatureState) + L"\n\n" +
@@ -515,16 +566,11 @@ LRESULT CALLBACK HostProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                         L"MiniPulse · 数据说明", MB_OK | MB_ICONINFORMATION);
             return 0;
         }
-        case kAutoStartId: {
-            if (AutoStartEnabled()) RunSchtasksSync(L"/Delete /TN \"MiniPulse\" /F");
-            else {
-                wchar_t modulePath[32768]{};
-                GetModuleFileNameW(nullptr, modulePath, 32768);
-                const std::wstring args = L"/Create /TN \"MiniPulse\" /TR \"\\\"" + std::wstring(modulePath) + L"\\\" --enable-sensors\" /SC ONLOGON /RL HIGHEST /F";
-                RunSchtasksSync(args);
-            }
+        case kAutoStartId: StartAutoStartAction(AutoStartAction::Enable); return 0;
+        case kAutoStartErrorId:
+            if (gAutoStart.error) MessageBoxW(hwnd, AutoStartErrorText(gAutoStart.error), L"MiniPulse · 登录自启", MB_OK | MB_ICONWARNING);
             return 0;
-        }
+        case kAutoStartDisableId: StartAutoStartAction(AutoStartAction::Disable); return 0;
         case kExitId: DestroyWindow(hwnd); return 0;
         }
         break;
@@ -544,7 +590,9 @@ LRESULT CALLBACK HostProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 }
 } // namespace
 
-int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
+int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR commandLine, int) {
+    const int autoStartExit = RunAutoStartCommand(commandLine);
+    if (autoStartExit != -1) return autoStartExit;
     ReadRuntimeOptions();
     gStartedAt = GetTickCount64();
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
@@ -563,6 +611,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     gHost = CreateWindowExW(0, hostClass.lpszClassName, L"MiniPulse",
                             WS_OVERLAPPED, 0, 0, 0, 0, nullptr, nullptr, instance, nullptr);
     if (!gHost) { CloseHandle(single); return 1; }
+    StartAutoStartAction(AutoStartAction::Query);
     gTray.cbSize = sizeof(gTray);
     gTray.hWnd = gHost;
     gTray.uID = kTrayId;
@@ -570,7 +619,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     gTray.uFlags = NIF_ICON | NIF_TIP | NIF_MESSAGE;
     StartTaskbarWidget(instance, gHost, kTrayMessage);
     StartTemperatureReader();
-    StartHardwareSensors(gEnableSensors);
+    StartHardwareSensors();
     InitializeDiskCounters();
     SampleMetrics();
     UpdateTray(true);

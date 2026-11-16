@@ -17,7 +17,6 @@ std::atomic<double> clockAverage{-1}, clockMaximum{-1};
 SRWLOCK clockLock = SRWLOCK_INIT;
 std::atomic<TemperatureState> state{TemperatureState::PermissionRequired};
 std::atomic<ULONGLONG> updated{0};
-std::atomic<bool> elevated{false};
 DWORD WINAPI Run(void*) {
     state = TemperatureState::Checking;
     GUID guid{};
@@ -54,7 +53,7 @@ DWORD WINAPI Run(void*) {
     SHELLEXECUTEINFOW launch{};
     launch.cbSize = sizeof(launch);
     launch.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_FLAG_NO_UI;
-    launch.lpVerb = elevated ? L"runas" : L"open";
+    launch.lpVerb = L"runas";
     launch.lpFile = exe.c_str(); launch.lpParameters = args.c_str(); launch.lpDirectory = directory.c_str(); launch.nShow = SW_HIDE;
     if (!ShellExecuteExW(&launch)) {
         state = GetLastError() == ERROR_CANCELLED ? TemperatureState::PermissionRequired : TemperatureState::ComponentMissing;
@@ -94,13 +93,13 @@ DWORD WINAPI Run(void*) {
     return 0;
 }
 }
-void StartHardwareSensors(bool requestElevation) {
+void StartHardwareSensors() {
     if (thread && WaitForSingleObject(thread, 0) != WAIT_OBJECT_0) return;
     if (thread) { CloseHandle(thread); thread = nullptr; }
     if (stop) CloseHandle(stop);
     stop = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     if (!stop) return;
-    elevated = requestElevation; cpu = memory = -1; clockAverage = clockMaximum = -1; updated = 0;
+    cpu = memory = -1; clockAverage = clockMaximum = -1; updated = 0;
     thread = CreateThread(nullptr, 0, Run, nullptr, 0, nullptr);
 }
 void StopHardwareSensors() {

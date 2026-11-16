@@ -27,7 +27,7 @@ Windows 11 native taskbar-tray resource monitor. MIT licensed source example.
 - Left/right-click tray icon for its menu; right-click strip/details for the same menu
 - Native UI needs no Qt, Python or Electron; hardware helper uses Windows .NET Framework 4.7.2+ and bundled dependencies
 - MiniPulse requests administrator privileges on launch and starts the hardware helper automatically; the helper inherits elevation and requires PawnIO. No Explorer injection is used.
-- Optional guided installer supports an all-users installation and optional startup shortcut.
+- Optional guided installer supports an all-users installation and startup at sign-in for the current administrator account.
 
 ## Build on Windows
 ### Portable toolchain (used for the packaged release)
@@ -68,7 +68,8 @@ Run `dist/MiniPulse-Setup-1.6.3-x64.exe`.
 The default is an all-users installation, requiring administrator approval.
 The destination page is always shown; you can change the default Program Files path.
 The installer creates a shared Start menu shortcut and an uninstall entry.
-Shared desktop and Windows startup shortcuts are optional and unchecked by default. The startup shortcut requests elevation through PowerShell and shows a UAC prompt at login.
+The shared desktop shortcut and startup at sign-in are optional and unchecked on a fresh installation. The tray menu controls startup after installation. MiniPulse uses a Windows scheduled task bound to the signed-in administrator account, so an enabled task can launch without a UAC prompt at sign-in. Launching MiniPulse directly still requests administrator approval.
+Scheduled startup requires a protected local folder, such as the default Program Files installation folder. Use the task's original MiniPulse copy to turn startup off before switching directory or moving a portable copy. An in-place upgrade keeps the existing startup setting.
 After installation, the wizard can start MiniPulse with administrator privileges.
 Use the tray icon's right-click menu to exit before upgrading or uninstalling.
 Distribute the setup EXE, or the complete portable ZIP including the `sensors` folder and notices;
@@ -82,7 +83,6 @@ The default hardware-temperature option opens the original PawnIO installer afte
 `tests/TemperatureSelectionTests.cpp` covers sensor selection and missing/invalid readings.
 `tests/WidgetHitTestTests.cpp` covers hover regions at full/compact widths and different DPI scales.
 For a timed smoke test, run `MiniPulse.exe --diagnostics=build/runtime.json --exit-after=10`.
-The former combined overview window has been removed. The legacy `--show-panel` argument is ignored.
 Diagnostics contain only metrics and widget geometry; diagnostics are disabled by default.
 Developer visual checks can use `--preview-hover=cpu` (or `ram`, `disk`, `net`) and `--render-preview=build/ui-preview.png`. These synthesize hover messages for the application's own widget and export the actual renderer with live samples; the output is a rendering preview, not a desktop screenshot.
 `--capture-widget=build/taskbar.png` captures the widget's own bounds from the actual desktop after initial sampling. This distinguishes compositor visibility from merely having a visible HWND. Diagnostics also verify the input target at the center of all four hover groups.
