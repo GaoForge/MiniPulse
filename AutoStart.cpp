@@ -95,11 +95,17 @@ std::wstring ProcessUser(HANDLE process) {
     return SidText(reinterpret_cast<TOKEN_USER*>(buffer.data())->User.Sid);
 }
 
-void RequireDesktopUser(const std::wstring& user) {
+bool DesktopUserIsElevated(const std::wstring& user) {
     DWORD pid = 0;
     GetWindowThreadProcessId(GetShellWindow(), &pid);
     Handle shell{pid ? OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid) : nullptr};
     if (!shell.value || !Equal(ProcessUser(shell.value), user)) throw kWrongAccount;
+    Handle token;
+    CheckWin32(OpenProcessToken(shell.value, TOKEN_QUERY, &token.value));
+    TOKEN_ELEVATION elevation{};
+    DWORD size = 0;
+    CheckWin32(GetTokenInformation(token.value, TokenElevation, &elevation, sizeof(elevation), &size));
+    return elevation.TokenIsElevated != 0;
 }
 
 bool SameUser(const std::wstring& account, const std::wstring& sid) {
@@ -151,18 +157,37 @@ void RequireProtectedObject(const fs::path& path, DWORD writeMask) {
     }
 }
 
+bool IsVolumeRoot(const fs::path& root) {
+    Handle directory{CreateFileW(root.c_str(), FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+        FILE_FLAG_BACKUP_SEMANTICS, nullptr)};
+    if (directory.value == INVALID_HANDLE_VALUE) {
+        directory.value = nullptr;
+        return false;
+    }
+    wchar_t resolved[128];
+    const DWORD length = GetFinalPathNameByHandleW(directory.value, resolved, ARRAYSIZE(resolved), VOLUME_NAME_GUID);
+    if (!length || length >= ARRAYSIZE(resolved)) return false;
+    const std::wstring path(resolved, length);
+    return path.rfind(L"\\\\?\\Volume{", 0) == 0 && path.find(L"}\\") == path.size() - 2;
+}
+
 void RequireProtectedExecutable(const fs::path& exe) {
     const auto root = exe.root_path();
     if (root.empty() || GetDriveTypeW(root.c_str()) != DRIVE_FIXED ||
         exe.wstring().find(L'%') != std::wstring::npos) throw kUnsafePath;
-    constexpr DWORD control = WRITE_DAC | WRITE_OWNER | DELETE | GENERIC_ALL;
-    constexpr DWORD write = control | GENERIC_WRITE | FILE_WRITE_DATA | FILE_APPEND_DATA |
-        FILE_WRITE_EA | FILE_WRITE_ATTRIBUTES | FILE_DELETE_CHILD;
+    constexpr DWORD control = WRITE_DAC | WRITE_OWNER | GENERIC_ALL;
+    constexpr DWORD removeChild = control | FILE_DELETE_CHILD;
+    constexpr DWORD write = removeChild | DELETE | GENERIC_WRITE | FILE_WRITE_DATA | FILE_APPEND_DATA |
+        FILE_WRITE_EA | FILE_WRITE_ATTRIBUTES;
     const auto directory = exe.parent_path();
     RequireProtectedObject(exe, write);
     RequireProtectedObject(directory, write);
+    // A volume root cannot itself be removed or renamed. Only rights that
+    // could replace the child directory or change the root ACL matter here.
     for (auto parent = directory.parent_path(); !parent.empty(); parent = parent.parent_path()) {
-        RequireProtectedObject(parent, control | FILE_DELETE_CHILD);
+        const bool volumeRoot = parent == root && IsVolumeRoot(root);
+        RequireProtectedObject(parent, volumeRoot ? removeChild : removeChild | DELETE);
         if (parent == root) break;
     }
     // These directories contain DLLs that are loaded by the elevated processes.
@@ -174,6 +199,20 @@ void RequireProtectedExecutable(const fs::path& exe) {
         RequireProtectedObject(sensors, write);
         for (const auto& entry : fs::recursive_directory_iterator(sensors)) RequireProtectedObject(entry.path(), write);
     }
+}
+
+bool UseBasicStartup(const fs::path& exe, bool desktopElevated) {
+    if (exe.root_path().empty() || GetDriveTypeW(exe.root_path().c_str()) != DRIVE_FIXED ||
+        exe.wstring().find(L'%') != std::wstring::npos) throw kUnsafePath;
+    try {
+        RequireProtectedExecutable(exe);
+        return false;
+    } catch (HRESULT error) {
+        if (error != kUnsafePath || desktopElevated) throw;
+    } catch (const fs::filesystem_error&) {
+        if (desktopElevated) throw;
+    }
+    return true;
 }
 
 std::wstring XmlEscape(const std::wstring& value) {
@@ -196,6 +235,7 @@ struct TaskStatus {
     bool owned = false;
     bool enabled = false;
     bool valid = false;
+    bool basic = false;
 };
 
 bool IsMissingMiniPulse(const fs::path& path) {
@@ -284,39 +324,42 @@ TaskStatus Inspect(IRegisteredTask* task, const std::wstring& name, const fs::pa
     Check(settings->get_DisallowStartIfOnBatteries(&disallowBattery));
     Check(settings->get_StopIfGoingOnBatteries(&stopOnBattery));
     Check(settings->get_MultipleInstances(&instances));
-    const bool valid = samePath && logonType == TASK_LOGON_INTERACTIVE_TOKEN && runLevel == TASK_RUNLEVEL_HIGHEST &&
+    const bool basic = runLevel == TASK_RUNLEVEL_LUA && args.str() == kBasicStartupArgument;
+    const bool elevated = runLevel == TASK_RUNLEVEL_HIGHEST && args.str().empty();
+    const bool valid = samePath && logonType == TASK_LOGON_INTERACTIVE_TOKEN && (basic || elevated) &&
         triggerEnabled != VARIANT_FALSE && SameUser(triggerUser.str(), user) && endBoundary.str().empty() &&
         triggerLimit.str() == L"PT0S" && timeLimit.str() == L"PT0S" &&
         disallowBattery == VARIANT_FALSE && stopOnBattery == VARIANT_FALSE &&
-        instances == TASK_INSTANCES_IGNORE_NEW && args.str().empty() &&
+        instances == TASK_INSTANCES_IGNORE_NEW &&
         Equal(workingDir.str(), exe.parent_path().wstring());
-    return {true, enabled != VARIANT_FALSE, valid};
+    return {true, enabled != VARIANT_FALSE, valid, basic};
 }
 
-std::wstring TaskXml(const std::wstring& user, const fs::path& exe) {
+std::wstring TaskXml(const std::wstring& user, const fs::path& exe, bool basic) {
+    const wchar_t* runLevel = basic ? L"LeastPrivilege" : L"HighestAvailable";
+    const std::wstring arguments = basic ? L"<Arguments>" + std::wstring(kBasicStartupArgument) + L"</Arguments>" : L"";
     return
         L"<Task xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\" version=\"1.2\">"
         L"<RegistrationInfo><Description>" + std::wstring(kTaskDescription) + L"</Description></RegistrationInfo>"
         L"<Triggers><LogonTrigger><ExecutionTimeLimit>PT0S</ExecutionTimeLimit><UserId>" + user +
         L"</UserId></LogonTrigger></Triggers>"
         L"<Principals><Principal><UserId>" + user +
-        L"</UserId><LogonType>InteractiveToken</LogonType><RunLevel>HighestAvailable</RunLevel></Principal></Principals>"
+        L"</UserId><LogonType>InteractiveToken</LogonType><RunLevel>" + runLevel + L"</RunLevel></Principal></Principals>"
         L"<Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>"
         L"<DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>"
         L"<StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><ExecutionTimeLimit>PT0S</ExecutionTimeLimit></Settings>"
-        L"<Actions><Exec><Command>" + XmlEscape(exe.wstring()) + L"</Command><WorkingDirectory>" +
+        L"<Actions><Exec><Command>" + XmlEscape(exe.wstring()) + L"</Command>" + arguments + L"<WorkingDirectory>" +
         XmlEscape(exe.parent_path().wstring()) + L"</WorkingDirectory></Exec></Actions></Task>";
 }
 
 void Register(ITaskFolder* folder, const std::wstring& name, const std::wstring& user,
-              const fs::path& exe, bool replace) {
-    RequireProtectedExecutable(exe);
+              const fs::path& exe, bool replace, bool basic) {
     VARIANT empty{}, principal{};
     BString sid(user);
     principal.vt = VT_BSTR;
     principal.bstrVal = sid.value;
     ComPtr<IRegisteredTask> registered;
-    Check(folder->RegisterTask(BString(name), BString(TaskXml(user, exe)),
+    Check(folder->RegisterTask(BString(name), BString(TaskXml(user, exe, basic)),
         (replace ? TASK_UPDATE : TASK_CREATE) | TASK_IGNORE_REGISTRATION_TRIGGERS,
         principal, empty, TASK_LOGON_INTERACTIVE_TOKEN, empty, registered.out()));
 }
@@ -369,7 +412,7 @@ AutoStartResult ManageAutoStart(AutoStartAction action) {
         }
 
         const auto user = ProcessUser(GetCurrentProcess());
-        if (action != AutoStartAction::Maintain) RequireDesktopUser(user);
+        const bool desktopElevated = action != AutoStartAction::Maintain && DesktopUserIsElevated(user);
         const auto name = kTaskPrefix + user;
         ComPtr<IRegisteredTask> task, legacy;
         ReadTask(folder.value, name, task);
@@ -379,12 +422,12 @@ AutoStartResult ManageAutoStart(AutoStartAction action) {
         const bool legacyElsewhere = !old.owned && !current.owned &&
             Inspect(legacy.value, kLegacyTask, {}, user, true).enabled;
         const auto state = (task && !current.owned) || legacyElsewhere ? State::Conflict :
-            current.enabled ? (current.valid ? State::On : State::NeedsRepair) :
+            current.enabled ? (current.valid && !(current.basic && desktopElevated) ?
+                (current.basic ? State::Basic : State::On) : State::NeedsRepair) :
             old.enabled ? State::Legacy : State::Off;
         if (action == AutoStartAction::Query) return {state, state == State::Conflict ? kTaskConflict : 0};
         if (action == AutoStartAction::Maintain && (state == State::Off || state == State::Conflict)) return {state};
         if (state == State::Conflict) return {state, kTaskConflict};
-        if (action == AutoStartAction::Maintain) RequireDesktopUser(user);
 
         if (action == AutoStartAction::Disable) {
             if (old.owned) Check(folder->DeleteTask(BString(kLegacyTask), 0));
@@ -396,12 +439,13 @@ AutoStartResult ManageAutoStart(AutoStartAction action) {
             return {State::Off};
         }
 
-        if (state != State::On) {
-            Register(folder.value, name, user, exe, current.owned);
+        const bool basic = UseBasicStartup(exe, action == AutoStartAction::Maintain ? DesktopUserIsElevated(user) : desktopElevated);
+        if (!current.enabled || !current.valid || current.basic != basic) {
+            Register(folder.value, name, user, exe, current.owned, basic);
             ComPtr<IRegisteredTask> saved;
             ReadTask(folder.value, name, saved);
             const auto stored = Inspect(saved.value, name, exe, user, false);
-            if (!stored.owned || !stored.valid || !stored.enabled) throw E_FAIL;
+            if (!stored.owned || !stored.valid || !stored.enabled || stored.basic != basic) throw E_FAIL;
         }
         if (old.owned) {
             Check(folder->DeleteTask(BString(kLegacyTask), 0));
@@ -409,7 +453,7 @@ AutoStartResult ManageAutoStart(AutoStartAction action) {
             ReadTask(folder.value, kLegacyTask, remainingLegacy);
             if (Inspect(remainingLegacy.value, kLegacyTask, exe, user, true).owned) throw E_FAIL;
         }
-        return {State::On};
+        return {basic ? State::Basic : State::On};
     } catch (HRESULT error) {
         return {State::Error, error};
     } catch (const fs::filesystem_error&) {
@@ -418,7 +462,7 @@ AutoStartResult ManageAutoStart(AutoStartAction action) {
 }
 
 const wchar_t* AutoStartErrorText(long error) {
-    if (error == kUnsafePath) return L"登录自启需要受管理员保护的本地目录。请使用安装程序的默认目录，或检查当前目录及依赖文件的权限。";
+    if (error == kUnsafePath) return L"无法为当前路径或账户安全开启登录自启。请使用本地固定磁盘，并确保 Windows 登录会话可以使用普通权限运行程序。";
     if (error == kWrongAccount) return L"请在当前登录的 Windows 管理员账户下设置自启。";
     if (error == kTaskConflict) return L"当前账户的自启任务已被其他位置的 MiniPulse 使用，或任务已被修改。请先从原位置关闭自启。";
     return L"Windows 未能确认登录自启设置。请确认任务计划程序服务可用，然后重试。";

@@ -66,10 +66,10 @@ build.bat
 ## Guided installation
 Run `dist/MiniPulse-Setup-1.6.3-x64.exe`.
 The default is an all-users installation, requiring administrator approval.
-The destination page is always shown; you can change the default Program Files path.
+Setup installs to Program Files\MiniPulse without a destination prompt. If an older version is installed elsewhere, exit and uninstall it before installing this version.
 The installer creates a shared Start menu shortcut and an uninstall entry.
 The shared desktop shortcut and startup at sign-in are optional and unchecked on a fresh installation. The tray menu controls startup after installation. MiniPulse uses a Windows scheduled task bound to the signed-in administrator account, so an enabled task can launch without a UAC prompt at sign-in. Launching MiniPulse directly still requests administrator approval.
-Scheduled startup requires a protected local folder, such as the default Program Files installation folder. Use the task's original MiniPulse copy to turn startup off before switching directory or moving a portable copy. An in-place upgrade keeps the existing startup setting.
+On protected local paths, scheduled startup also starts the hardware sensor helper. On writable local paths, the scheduled task starts MiniPulse with standard privileges. CPU, RAM, disk, and network usage remain available, and the tray can request permission for hardware sensors separately. Turn off startup before moving a portable copy. An in-place upgrade keeps the existing startup setting.
 After installation, the wizard can start MiniPulse with administrator privileges.
 Use the tray icon's right-click menu to exit before upgrading or uninstalling.
 Distribute the setup EXE, or the complete portable ZIP including the `sensors` folder and notices;

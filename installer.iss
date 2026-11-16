@@ -1,16 +1,17 @@
-#define AppVersion "1.6.4"
+#define AppVersion "1.6.5"
 #define AppGuid "38D2B470-89CA-4D96-A7B8-6E896B11579A"
+#define InstallDir "{commonpf64}\MiniPulse"
 
 [Setup]
 AppId={{{#AppGuid}}
 AppName=MiniPulse
 AppVersion={#AppVersion}
 AppPublisher=MiniPulse contributors
-DefaultDirName={autopf}\MiniPulse
+DefaultDirName={#InstallDir}
 DefaultGroupName=MiniPulse
 PrivilegesRequired=admin
-PrivilegesRequiredOverridesAllowed=commandline
-DisableDirPage=no
+DisableDirPage=yes
+UsePreviousAppDir=no
 DisableProgramGroupPage=yes
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
@@ -69,8 +70,23 @@ begin
 end;
 
 function ExistingAdminInstall: Boolean;
+var Directory: String;
 begin
-  Result := RegKeyExists(HKLM64, 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{{#AppGuid}}_is1');
+  Result := RegQueryStringValue(HKLM64, 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{{#AppGuid}}_is1',
+    'InstallLocation', Directory) and
+    (CompareText(RemoveBackslashUnlessRoot(Directory), ExpandConstant('{#InstallDir}')) = 0);
+end;
+
+procedure InitializeWizard;
+begin
+  WizardForm.DirEdit.Text := ExpandConstant('{#InstallDir}');
+end;
+
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+begin
+  Result := '';
+  if CompareText(RemoveBackslashUnlessRoot(WizardDirValue), ExpandConstant('{#InstallDir}')) <> 0 then
+    Result := CustomMessage('FixedInstallDirError') + ' ' + ExpandConstant('{#InstallDir}');
 end;
 
 function OfferLogonStartup: Boolean;
@@ -104,10 +120,10 @@ begin
     Upgrading := ExistingAdminInstall;
   if (CurStep <> ssPostInstall) or not IsAdminInstallMode then
     exit;
-  if WizardIsTaskSelected('logonstartup') then
-    ConfigureLogonStartup('--autostart-enable', CustomMessage('StartupConfigureError'))
-  else if Upgrading then
-    ConfigureLogonStartup('--autostart-maintain', CustomMessage('StartupConfigureError'));
+  if Upgrading then
+    ConfigureLogonStartup('--autostart-maintain', CustomMessage('StartupConfigureError'))
+  else if WizardIsTaskSelected('logonstartup') then
+    ConfigureLogonStartup('--autostart-enable', CustomMessage('StartupConfigureError'));
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
@@ -124,7 +140,8 @@ chinesesimp.StartupTask=登录 Windows 时启动 MiniPulse（当前账户）
 chinesesimp.StartupGroup=启动选项：
 chinesesimp.StartupConfigureError=未能配置登录自启。可以在安装后通过托盘菜单检查设置。
 chinesesimp.StartupCleanupError=未能清理登录自启任务。请在 Windows 任务计划程序中检查指向此安装位置的 MiniPulse 任务。
-chinesesimp.StartupPathError=请选择受管理员保护的本地目录，例如默认安装目录。
+chinesesimp.StartupPathError=当前路径或账户无法安全开启登录自启。
+chinesesimp.FixedInstallDirError=MiniPulse 的固定安装目录为
 chinesesimp.StartupAccountError=请使用当前登录的 Windows 管理员账户设置自启。
 chinesesimp.StartupConflictError=当前账户的自启任务已被其他位置的 MiniPulse 使用，或任务已被修改。
 chinesesimp.LaunchApp=立即启动 MiniPulse
@@ -137,7 +154,8 @@ english.StartupTask=Start MiniPulse when signing in to Windows (current account)
 english.StartupGroup=Startup options:
 english.StartupConfigureError=Could not configure startup at sign-in. Check the tray menu after installation.
 english.StartupCleanupError=Could not remove the startup task. Check Task Scheduler for MiniPulse tasks pointing to this installation.
-english.StartupPathError=Use a protected local folder such as the default installation folder.
+english.StartupPathError=Startup at sign-in cannot be enabled safely for this path or account.
+english.FixedInstallDirError=MiniPulse uses this fixed installation folder:
 english.StartupAccountError=Configure startup from the administrator account signed in to Windows.
 english.StartupConflictError=Another MiniPulse location uses the startup task for this account, or the task was modified.
 english.LaunchApp=Launch MiniPulse now

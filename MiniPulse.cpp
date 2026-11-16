@@ -84,6 +84,7 @@ PDH_HQUERY gDiskQuery = nullptr;
 PDH_HCOUNTER gDiskRead = nullptr, gDiskWrite = nullptr;
 PDH_HCOUNTER gDiskReads = nullptr, gDiskWrites = nullptr;
 std::wstring gDiagnosticsPath;
+bool gBasicStartup = false;
 
 int gPreviewSection = -1;
 
@@ -104,7 +105,8 @@ void ReadRuntimeOptions() {
     for (int i = 1; i < count; ++i) {
         const std::wstring argument(arguments[i]);
 
-        if (argument.rfind(L"--preview-hover=", 0) == 0) {
+        if (argument == kBasicStartupArgument) gBasicStartup = true;
+        else if (argument.rfind(L"--preview-hover=", 0) == 0) {
             const std::wstring section = argument.substr(16);
             if (section == L"cpu") gPreviewSection = 0;
             else if (section == L"ram") gPreviewSection = 1;
@@ -452,6 +454,9 @@ void AppendAutoStartMenu(HMENU menu) {
         return;
     }
     switch (gAutoStart.state) {
+    case State::Basic:
+        AppendMenuW(menu, MF_STRING | MF_CHECKED, kAutoStartDisableId, L"登录时启动 MiniPulse（普通权限）");
+        break;
     case State::On:
     case State::Legacy:
         AppendMenuW(menu, MF_STRING | MF_CHECKED, kAutoStartDisableId, L"登录时启动 MiniPulse");
@@ -486,7 +491,7 @@ void ShowContextMenu() {
     if (placement == WidgetPlacement::Taskbar && !WidgetHasSpace()) {
         AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, L"布局不可用或空间不足，可切换到上方");
     }
-    AppendMenuW(menu, MF_STRING, kEnableSensorsId, L"重试硬件采温");
+    AppendMenuW(menu, MF_STRING, kEnableSensorsId, gBasicStartup ? L"授权硬件采温" : L"重试硬件采温");
     AppendMenuW(menu, MF_STRING, kTemperatureHelpId, L"温度数据说明");
     AppendAutoStartMenu(menu);
     if (!gAutoStartBusy) StartAutoStartAction(AutoStartAction::Query);
@@ -557,8 +562,8 @@ LRESULT CALLBACK HostProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case kTemperatureHelpId: {
             const std::wstring status = L"CPU：" + std::wstring(TemperatureStateText(gMetrics.cpuTemperatureState)) +
                 L"\n内存：" + TemperatureStateText(gMetrics.memoryTemperatureState) + L"\n\n" +
-                L"独立采温采用 LibreHardwareMonitor + PawnIO。请先通过安装包安装驱动，程序启动后会自动启用硬件采温。\n\n"
-                        L"MiniPulse 启动时自动请求管理员权限，采温组件继承权限，无需单独授权；采温进程随 MiniPulse 退出，也支持已有监控软件的 WMI 数据作为备用。\n\n"
+                L"独立采温采用 LibreHardwareMonitor + PawnIO，需要先安装驱动。\n\n"
+                        L"普通权限自启时可从托盘菜单授权硬件采温。采温进程随 MiniPulse 退出，也支持已有监控软件的 WMI 数据作为备用。\n\n"
                         L"CPU 优先显示封装温度，否则显示最热核心；内存只使用明确标注的内存温度传感器。\n"
                         L"没有可用数据或硬件不支持时显示“—”，不会用主板或 ACPI 温度代替。\n\n"
                         L"磁盘读写为全部物理磁盘的合计吞吐量。指标栏 K/s 和 M/s 分别为 KiB/s 和 MiB/s。";
@@ -594,6 +599,27 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR commandLine, int) {
     const int autoStartExit = RunAutoStartCommand(commandLine);
     if (autoStartExit != -1) return autoStartExit;
     ReadRuntimeOptions();
+    HANDLE token = nullptr;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) return 1;
+    TOKEN_ELEVATION elevation{};
+    DWORD size = 0;
+    const BOOL tokenRead = GetTokenInformation(token, TokenElevation, &elevation, sizeof(elevation), &size);
+    CloseHandle(token);
+    if (!tokenRead) return 1;
+    if (gBasicStartup && elevation.TokenIsElevated) return ERROR_ACCESS_DENIED;
+    if (!gBasicStartup && !elevation.TokenIsElevated) {
+        wchar_t path[32768];
+        const DWORD length = GetModuleFileNameW(nullptr, path, ARRAYSIZE(path));
+        if (!length || length == ARRAYSIZE(path)) return 1;
+        SHELLEXECUTEINFOW launch{};
+        launch.cbSize = sizeof(launch);
+        launch.fMask = SEE_MASK_NOASYNC;
+        launch.lpVerb = L"runas";
+        launch.lpFile = path;
+        launch.lpParameters = commandLine;
+        launch.nShow = SW_SHOWNORMAL;
+        return ShellExecuteExW(&launch) ? 0 : static_cast<int>(GetLastError());
+    }
     gStartedAt = GetTickCount64();
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     HANDLE single = CreateMutexW(nullptr, TRUE, L"Local\\MiniPulseTraySingleton_1014");
@@ -619,7 +645,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR commandLine, int) {
     gTray.uFlags = NIF_ICON | NIF_TIP | NIF_MESSAGE;
     StartTaskbarWidget(instance, gHost, kTrayMessage);
     StartTemperatureReader();
-    StartHardwareSensors();
+    if (!gBasicStartup) StartHardwareSensors();
     InitializeDiskCounters();
     SampleMetrics();
     UpdateTray(true);
